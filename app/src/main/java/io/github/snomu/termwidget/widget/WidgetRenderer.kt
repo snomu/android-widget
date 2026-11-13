@@ -40,6 +40,8 @@ object WidgetRenderer {
     private const val TICKER_SCALE = 0.80f
     private const val MIN_CELL_PX = 4
     private const val MIN_TICKER_FONT_PX = 6f
+    private const val FIT_TOLERANCE_PX = 0.01f
+    private const val SEARCH_STEPS = 20
     private const val MARKER = "⁺"
     private const val CODE_GAP = "  "
 
@@ -118,7 +120,10 @@ object WidgetRenderer {
             fontPx = fontForCell(paint, cellPx, rowChars)
         }
 
-        val tableWidthPx = cellPx * rowChars
+        // Measured rather than assumed: the fitted size can be slightly narrower
+        // than the cells it was aiming for.
+        paint.textSize = fontPx
+        val tableWidthPx = ceil(advance(paint, "0".repeat(rowChars)) - FIT_TOLERANCE_PX).toInt()
         val tickerPx = fitTickerFont(paint, model.tickers, fontPx * TICKER_SCALE, tableWidthPx.toFloat())
 
         // Centre the table; the separator and ticker line then span exactly its width.
@@ -195,9 +200,12 @@ object WidgetRenderer {
     }
 
     /**
-     * The largest text size whose character advance does not exceed [cellPx].
-     * It lands a hair under the whole pixel, so every run of n characters
-     * rounds up to exactly n cells when a TextView measures it.
+     * The text size at which one character advances by [cellPx], so that every
+     * run of n characters measures exactly n cells in whichever view holds it.
+     *
+     * Advances are not always proportional to the text size: with font hinting
+     * they snap to whole pixels. So the size is found by measuring. If no size
+     * gives exactly [cellPx], the result is the nearest size that is narrower.
      */
     private fun fontForCell(paint: Paint, cellPx: Int, rowChars: Int): Float {
         paint.textSize = 100f
@@ -206,15 +214,37 @@ object WidgetRenderer {
 
         val sample = "0".repeat(rowChars)
         val target = (cellPx * rowChars).toFloat()
-        var size = cellPx / advancePerPx
-        paint.textSize = size
-        var guard = 0
-        while (advance(paint, sample) > target && guard < 200) {
-            size -= 0.01f
+        fun width(size: Float): Float {
             paint.textSize = size
-            guard += 1
+            return advance(paint, sample)
         }
-        return size
+
+        val nominal = cellPx / advancePerPx
+        val nominalWidth = width(nominal)
+        return when {
+            abs(nominalWidth - target) <= FIT_TOLERANCE_PX -> nominal
+            nominalWidth > target -> {
+                // Too wide: the largest size below nominal that fits.
+                var fits = nominal * 0.75f
+                var tooWide = nominal
+                repeat(SEARCH_STEPS) {
+                    val mid = (fits + tooWide) / 2f
+                    if (width(mid) <= target) fits = mid else tooWide = mid
+                }
+                fits
+            }
+            else -> {
+                // Too narrow: the smallest size above nominal that fills the cells.
+                var tooNarrow = nominal
+                var fills = nominal * 1.25f
+                if (width(fills) < target) return nominal
+                repeat(SEARCH_STEPS) {
+                    val mid = (tooNarrow + fills) / 2f
+                    if (width(mid) >= target) fills = mid else tooNarrow = mid
+                }
+                if (width(fills) <= target + FIT_TOLERANCE_PX) fills else nominal
+            }
+        }
     }
 
     /** The exact, unrounded advance of [text]. */
