@@ -46,3 +46,5 @@ secrets/
 signing/
 *.pem
 *.p12
+
+artifacts/
