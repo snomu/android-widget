@@ -22,10 +22,16 @@ captures/
 # Local configuration
 local.properties
 keystore.properties
-*.jks
-*.keystore
 .env
 .env.*
+
+# Signing keys, in any encoding (for example term.keystore.base64)
+*.jks
+*.jks.*
+*.keystore
+*.keystore.*
+*.base64
+*.b64
 
 # IDE
 .idea/
@@ -41,10 +47,14 @@ Thumbs.db
 # Kotlin
 .kotlin/
 
-# Secrets / signing material
+# Other secrets
 secrets/
+secrets.*
 signing/
 *.pem
 *.p12
+*.pfx
+*.key
 
+# Local screenshots
 artifacts/
