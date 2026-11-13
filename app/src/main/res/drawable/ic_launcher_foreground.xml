@@ -1,13 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- A terminal prompt: ">_". Drawn inside the adaptive icon safe zone. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
-        android:fillColor="#6EE7D8"
-        android:pathData="M30,70 L30,38 L38,38 L38,62 L50,62 L50,70 Z" />
+        android:pathData="M34,40 L49,54 L34,68"
+        android:strokeWidth="7"
+        android:strokeColor="#6EE7D8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
     <path
-        android:fillColor="#E8E8E8"
-        android:pathData="M56,70 L56,38 L78,38 L78,46 L64,46 L64,50 L76,50 L76,58 L64,58 L64,70 Z" />
+        android:pathData="M56,68 L74,68"
+        android:strokeWidth="7"
+        android:strokeColor="#E8E8E8"
+        android:strokeLineCap="round" />
 </vector>

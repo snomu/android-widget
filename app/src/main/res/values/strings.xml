@@ -2,5 +2,4 @@
 <resources>
     <string name="app_name">term</string>
     <string name="widget_description">World clocks, weather table, and market ticker</string>
-    <string name="settings_title">term settings</string>
 </resources>
