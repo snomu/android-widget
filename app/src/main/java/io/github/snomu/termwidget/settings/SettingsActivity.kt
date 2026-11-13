@@ -1,6 +1,5 @@
 package io.github.snomu.termwidget.settings
 
-import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Intent
@@ -10,7 +9,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,7 +19,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -43,13 +43,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier as ComposeModifier
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
+import io.github.snomu.termwidget.data.ConfigEdits
 import io.github.snomu.termwidget.data.KeyVault
 import io.github.snomu.termwidget.data.Store
+import io.github.snomu.termwidget.model.AppConfig
 import io.github.snomu.termwidget.model.City
 import io.github.snomu.termwidget.model.Ticker
 import io.github.snomu.termwidget.model.TickerDisplayMode
@@ -60,17 +63,16 @@ import kotlinx.coroutines.launch
 import java.time.ZoneId
 
 class SettingsActivity : ComponentActivity() {
-    private var appWidgetId = AppWidgetManager.INVALID_APPWIDGET_ID
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        appWidgetId = intent?.getIntExtra(
+        // When opened as the widget's configure screen, report success up front:
+        // every setting has a working default, so backing out still adds the widget.
+        val appWidgetId = intent?.getIntExtra(
             AppWidgetManager.EXTRA_APPWIDGET_ID,
             AppWidgetManager.INVALID_APPWIDGET_ID,
         ) ?: AppWidgetManager.INVALID_APPWIDGET_ID
-
         if (appWidgetId != AppWidgetManager.INVALID_APPWIDGET_ID) {
             setResult(
                 RESULT_OK,
@@ -82,7 +84,7 @@ class SettingsActivity : ComponentActivity() {
         val keyVault = KeyVault(this)
 
         setContent {
-            TermTheme {
+            MaterialTheme(colorScheme = TermDarkColors) {
                 SettingsScreen(
                     store = store,
                     keyVault = keyVault,
@@ -91,55 +93,53 @@ class SettingsActivity : ComponentActivity() {
                         Toast.makeText(this, "Refreshing…", Toast.LENGTH_SHORT).show()
                     },
                     onAddWidget = { requestPinWidget() },
-                    onConfigSaved = {
-                        if (appWidgetId != AppWidgetManager.INVALID_APPWIDGET_ID) {
-                            TermWidgetProvider.updateOne(
-                                this,
-                                AppWidgetManager.getInstance(this),
-                                appWidgetId,
-                                null,
-                            )
-                        } else {
-                            TermWidgetProvider.updateAll(this)
-                        }
-                        RefreshScheduler.refreshNow(this)
-                    },
+                    onChanged = { applyChange() },
                 )
             }
         }
     }
 
+    /** Shows the change right away from the cache, then fetches whatever is new. */
+    private fun applyChange() {
+        val appContext = applicationContext
+        lifecycleScope.launch {
+            TermWidgetProvider.updateAll(appContext)
+            RefreshScheduler.refreshNow(appContext)
+        }
+    }
+
     private fun requestPinWidget() {
         val manager = AppWidgetManager.getInstance(this)
-        val provider = ComponentName(this, TermWidgetProvider::class.java)
         if (manager.isRequestPinAppWidgetSupported) {
-            val success = PendingIntent.getBroadcast(
-                this,
-                0,
-                Intent(this, TermWidgetProvider::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            manager.requestPinAppWidget(
+                ComponentName(this, TermWidgetProvider::class.java),
+                null,
+                null,
             )
-            manager.requestPinAppWidget(provider, null, success)
         } else {
-            Toast.makeText(this, "Pinning not supported on this launcher", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "This launcher cannot pin widgets", Toast.LENGTH_SHORT).show()
         }
     }
 }
 
+private val Teal = Color(0xFF6EE7D8)
+private val TextColor = Color(0xFFE8E8E8)
+private val Dim = Color(0xFF6B7480)
+private val Card = Color(0xFF121212)
+private val ErrorRed = Color(0xFFFF6B6B)
+
 private val TermDarkColors = darkColorScheme(
-    primary = Color(0xFF6EE7D8),
+    primary = Teal,
     onPrimary = Color.Black,
     background = Color.Black,
-    onBackground = Color(0xFFE8E8E8),
-    surface = Color(0xFF121212),
-    onSurface = Color(0xFFE8E8E8),
+    onBackground = TextColor,
+    surface = Card,
+    onSurface = TextColor,
     secondary = Color(0xFF9BE564),
 )
 
-@Composable
-private fun TermTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = TermDarkColors, content = content)
-}
+/** Which item an editor dialog is for: a new one, or the one at [index]. */
+private data class Editing(val index: Int?)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -148,39 +148,49 @@ private fun SettingsScreen(
     keyVault: KeyVault,
     onRefreshNow: () -> Unit,
     onAddWidget: () -> Unit,
-    onConfigSaved: () -> Unit,
+    onChanged: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val config by store.configFlow.collectAsState(
-        initial = io.github.snomu.termwidget.data.Defaults.config,
-    )
+    // Null until the saved settings are read, so edits never start from defaults by mistake.
+    val loaded: AppConfig? by store.configFlow.collectAsState(initial = null)
     var hasKey by remember { mutableStateOf(false) }
     var apiKeyInput by remember { mutableStateOf("") }
-    var editingCity by remember { mutableStateOf<City?>(null) }
-    var editingTicker by remember { mutableStateOf<Ticker?>(null) }
-    var addingCity by remember { mutableStateOf(false) }
-    var addingTicker by remember { mutableStateOf(false) }
+    var cityEditor by remember { mutableStateOf<Editing?>(null) }
+    var tickerEditor by remember { mutableStateOf<Editing?>(null) }
 
     LaunchedEffect(Unit) {
         hasKey = keyVault.hasKey()
     }
 
+    fun saveCities(cities: List<City>) {
+        scope.launch {
+            store.saveCities(cities)
+            onChanged()
+        }
+    }
+
+    fun saveTickers(tickers: List<Ticker>) {
+        scope.launch {
+            store.saveTickers(tickers)
+            onChanged()
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = {
-                    Text("term settings", fontFamily = FontFamily.Monospace)
-                },
+                title = { Text("term settings", fontFamily = FontFamily.Monospace) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Color.Black,
-                    titleContentColor = Color(0xFFE8E8E8),
+                    titleContentColor = TextColor,
                 ),
             )
         },
         containerColor = Color.Black,
     ) { padding ->
+        val config = loaded ?: return@Scaffold
         Column(
-            modifier = ComposeModifier
+            modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
@@ -189,31 +199,32 @@ private fun SettingsScreen(
         ) {
             SectionTitle("Finnhub API key")
             Text(
-                text = if (hasKey) "Key saved (write-only; enter a new value to replace)."
-                else "No key saved. Stocks need a free Finnhub key.",
-                color = Color(0xFF6B7480),
+                text = if (hasKey) {
+                    "A key is saved. It is never shown again; enter a new one to replace it."
+                } else {
+                    "No key saved. Stock tickers need a free Finnhub key."
+                },
+                color = Dim,
                 style = MaterialTheme.typography.bodySmall,
             )
             OutlinedTextField(
                 value = apiKeyInput,
                 onValueChange = { apiKeyInput = it },
-                modifier = ComposeModifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth(),
                 label = { Text("API key") },
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
+                    enabled = apiKeyInput.isNotBlank(),
                     onClick = {
+                        val key = apiKeyInput.trim()
                         scope.launch {
-                            val trimmed = apiKeyInput.trim()
-                            if (trimmed.isEmpty()) {
-                                return@launch
-                            }
-                            keyVault.save(trimmed)
+                            keyVault.save(key)
                             apiKeyInput = ""
                             hasKey = true
-                            onConfigSaved()
+                            onChanged()
                         }
                     },
                 ) { Text("Save key") }
@@ -231,155 +242,71 @@ private fun SettingsScreen(
 
             SectionTitle("Cities")
             config.cities.forEachIndexed { index, city ->
-                CityRow(
-                    city = city,
-                    onEdit = { editingCity = city },
-                    onDelete = {
-                        scope.launch {
-                            val next = config.cities.toMutableList().also { it.removeAt(index) }
-                            if (next.isNotEmpty() && next.none { it.home }) {
-                                next[0] = next[0].copy(home = true)
-                            }
-                            if (next.isNotEmpty()) {
-                                store.saveCities(next)
-                                onConfigSaved()
-                            }
-                        }
-                    },
-                    onMoveUp = {
-                        if (index == 0) return@CityRow
-                        scope.launch {
-                            val next = config.cities.toMutableList()
-                            val item = next.removeAt(index)
-                            next.add(index - 1, item)
-                            store.saveCities(next)
-                            onConfigSaved()
-                        }
-                    },
-                    onMoveDown = {
-                        if (index >= config.cities.lastIndex) return@CityRow
-                        scope.launch {
-                            val next = config.cities.toMutableList()
-                            val item = next.removeAt(index)
-                            next.add(index + 1, item)
-                            store.saveCities(next)
-                            onConfigSaved()
-                        }
-                    },
+                ItemCard(
+                    title = city.code + if (city.home) "  (home)" else "",
+                    subtitle = "${city.latitude}, ${city.longitude}  ${city.timeZone}",
+                    canMoveUp = index > 0,
+                    canMoveDown = index < config.cities.lastIndex,
+                    // The widget needs at least one city.
+                    canDelete = config.cities.size > 1,
+                    onMoveUp = { saveCities(ConfigEdits.move(config.cities, index, -1)) },
+                    onMoveDown = { saveCities(ConfigEdits.move(config.cities, index, 1)) },
+                    onEdit = { cityEditor = Editing(index) },
+                    onDelete = { saveCities(ConfigEdits.removeCity(config.cities, index)) },
                 )
             }
-            TextButton(onClick = { addingCity = true }) { Text("+ Add city") }
+            TextButton(onClick = { cityEditor = Editing(null) }) { Text("+ Add city") }
 
             SectionTitle("Tickers")
             config.tickers.forEachIndexed { index, ticker ->
-                TickerRow(
-                    ticker = ticker,
-                    onEdit = { editingTicker = ticker },
-                    onDelete = {
-                        scope.launch {
-                            val next = config.tickers.toMutableList().also { it.removeAt(index) }
-                            store.saveTickers(next)
-                            onConfigSaved()
-                        }
-                    },
-                    onMoveUp = {
-                        if (index == 0) return@TickerRow
-                        scope.launch {
-                            val next = config.tickers.toMutableList()
-                            val item = next.removeAt(index)
-                            next.add(index - 1, item)
-                            store.saveTickers(next)
-                            onConfigSaved()
-                        }
-                    },
-                    onMoveDown = {
-                        if (index >= config.tickers.lastIndex) return@TickerRow
-                        scope.launch {
-                            val next = config.tickers.toMutableList()
-                            val item = next.removeAt(index)
-                            next.add(index + 1, item)
-                            store.saveTickers(next)
-                            onConfigSaved()
-                        }
-                    },
+                ItemCard(
+                    title = "${ticker.label}  →  ${ticker.symbol}",
+                    subtitle = "${ticker.source} / ${ticker.displayMode}",
+                    canMoveUp = index > 0,
+                    canMoveDown = index < config.tickers.lastIndex,
+                    canDelete = true,
+                    onMoveUp = { saveTickers(ConfigEdits.move(config.tickers, index, -1)) },
+                    onMoveDown = { saveTickers(ConfigEdits.move(config.tickers, index, 1)) },
+                    onEdit = { tickerEditor = Editing(index) },
+                    onDelete = { saveTickers(config.tickers.filterIndexed { i, _ -> i != index }) },
                 )
             }
-            TextButton(onClick = { addingTicker = true }) { Text("+ Add ticker") }
+            TextButton(onClick = { tickerEditor = Editing(null) }) { Text("+ Add ticker") }
 
-            Spacer(ComposeModifier.height(8.dp))
-            Button(onClick = onRefreshNow, modifier = ComposeModifier.fillMaxWidth()) {
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = onRefreshNow, modifier = Modifier.fillMaxWidth()) {
                 Text("Refresh now")
             }
-            OutlinedButton(onClick = onAddWidget, modifier = ComposeModifier.fillMaxWidth()) {
+            OutlinedButton(onClick = onAddWidget, modifier = Modifier.fillMaxWidth()) {
                 Text("Add widget to home screen")
             }
         }
     }
 
-    if (addingCity || editingCity != null) {
+    val config = loaded ?: return
+
+    cityEditor?.let { editing ->
         CityEditorDialog(
-            initial = editingCity,
-            onDismiss = {
-                addingCity = false
-                editingCity = null
-            },
+            initial = editing.index?.let { config.cities.getOrNull(it) },
+            isDuplicateCode = { ConfigEdits.isDuplicateCode(config.cities, it, editing.index) },
+            onDismiss = { cityEditor = null },
             onSave = { city ->
-                scope.launch {
-                    val next = config.cities.toMutableList()
-                    if (editingCity != null) {
-                        val idx = next.indexOfFirst { it.code == editingCity!!.code && it.timeZone == editingCity!!.timeZone }
-                        if (idx >= 0) next[idx] = city else next += city
-                    } else {
-                        next += city
-                    }
-                    val withCity = next.map { existing ->
-                        if (existing.code == city.code && existing.timeZone == city.timeZone) city else existing
-                    }.let { list ->
-                        if (list.any { it.code == city.code && it.timeZone == city.timeZone }) list
-                        else list + city
-                    }
-                    val normalized = when {
-                        city.home -> withCity.map {
-                            if (it.code == city.code && it.timeZone == city.timeZone) city
-                            else it.copy(home = false)
-                        }
-                        withCity.none { it.home } -> withCity.mapIndexed { i, c ->
-                            if (i == 0) c.copy(home = true) else c
-                        }
-                        else -> withCity
-                    }
-                    store.saveCities(normalized)
-                    addingCity = false
-                    editingCity = null
-                    onConfigSaved()
-                }
+                saveCities(ConfigEdits.upsertCity(config.cities, editing.index, city))
+                cityEditor = null
             },
         )
     }
 
-    if (addingTicker || editingTicker != null) {
+    tickerEditor?.let { editing ->
         TickerEditorDialog(
-            initial = editingTicker,
-            onDismiss = {
-                addingTicker = false
-                editingTicker = null
-            },
+            initial = editing.index?.let { config.tickers.getOrNull(it) },
+            onDismiss = { tickerEditor = null },
             onSave = { ticker ->
-                scope.launch {
-                    val next = config.tickers.toMutableList()
-                    if (editingTicker != null) {
-                        val idx = next.indexOfFirst {
-                            it.label == editingTicker!!.label && it.symbol == editingTicker!!.symbol
-                        }
-                        if (idx >= 0) next[idx] = ticker else next += ticker
-                    } else {
-                        next += ticker
-                    }
-                    store.saveTickers(next)
-                    addingTicker = false
-                    editingTicker = null
-                    onConfigSaved()
-                }
+                val index = editing.index
+                val next = config.tickers.toMutableList()
+                if (index != null && index in next.indices) next[index] = ticker else next += ticker
+                saveTickers(next)
+                tickerEditor = null
             },
         )
     }
@@ -391,77 +318,41 @@ private fun SectionTitle(text: String) {
         text = text,
         style = MaterialTheme.typography.titleMedium,
         fontFamily = FontFamily.Monospace,
-        color = Color(0xFF6EE7D8),
-        modifier = ComposeModifier.padding(top = 8.dp),
+        color = Teal,
+        modifier = Modifier.padding(top = 8.dp),
     )
 }
 
 @Composable
-private fun CityRow(
-    city: City,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
+private fun ItemCard(
+    title: String,
+    subtitle: String,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    canDelete: Boolean,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     Column(
-        modifier = ComposeModifier
+        modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xFF121212))
-            .clickable(onClick = onEdit)
+            .background(Card)
             .padding(12.dp),
     ) {
+        Text(text = title, fontFamily = FontFamily.Monospace, color = Color.White)
         Text(
-            text = "${city.code}${if (city.home) "  (home)" else ""}",
-            fontFamily = FontFamily.Monospace,
-            color = Color.White,
-        )
-        Text(
-            text = "${city.latitude}, ${city.longitude}  ${city.timeZone}",
+            text = subtitle,
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF6B7480),
+            color = Dim,
             fontFamily = FontFamily.Monospace,
         )
         Row {
-            TextButton(onClick = onMoveUp) { Text("Up") }
-            TextButton(onClick = onMoveDown) { Text("Down") }
+            TextButton(onClick = onMoveUp, enabled = canMoveUp) { Text("Up") }
+            TextButton(onClick = onMoveDown, enabled = canMoveDown) { Text("Down") }
             TextButton(onClick = onEdit) { Text("Edit") }
-            TextButton(onClick = onDelete) { Text("Delete") }
-        }
-    }
-}
-
-@Composable
-private fun TickerRow(
-    ticker: Ticker,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
-    onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit,
-) {
-    Column(
-        modifier = ComposeModifier
-            .fillMaxWidth()
-            .background(Color(0xFF121212))
-            .clickable(onClick = onEdit)
-            .padding(12.dp),
-    ) {
-        Text(
-            text = "${ticker.label}  →  ${ticker.symbol}",
-            fontFamily = FontFamily.Monospace,
-            color = Color.White,
-        )
-        Text(
-            text = "${ticker.source} / ${ticker.displayMode}",
-            style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF6B7480),
-            fontFamily = FontFamily.Monospace,
-        )
-        Row {
-            TextButton(onClick = onMoveUp) { Text("Up") }
-            TextButton(onClick = onMoveDown) { Text("Down") }
-            TextButton(onClick = onEdit) { Text("Edit") }
-            TextButton(onClick = onDelete) { Text("Delete") }
+            TextButton(onClick = onDelete, enabled = canDelete) { Text("Delete") }
         }
     }
 }
@@ -469,6 +360,7 @@ private fun TickerRow(
 @Composable
 private fun CityEditorDialog(
     initial: City?,
+    isDuplicateCode: (String) -> Boolean,
     onDismiss: () -> Unit,
     onSave: (City) -> Unit,
 ) {
@@ -479,52 +371,61 @@ private fun CityEditorDialog(
     var home by remember { mutableStateOf(initial?.home ?: false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    androidx.compose.material3.AlertDialog(
+    AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (initial == null) "Add city" else "Edit city") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = code, onValueChange = { code = it.uppercase().take(3) }, label = { Text("Code") }, singleLine = true)
-                OutlinedTextField(value = lat, onValueChange = { lat = it }, label = { Text("Latitude") }, singleLine = true)
-                OutlinedTextField(value = lon, onValueChange = { lon = it }, label = { Text("Longitude") }, singleLine = true)
-                OutlinedTextField(value = zone, onValueChange = { zone = it }, label = { Text("IANA time zone") }, singleLine = true)
+                OutlinedTextField(
+                    value = code,
+                    onValueChange = { code = it.uppercase().filter(Char::isLetterOrDigit).take(3) },
+                    label = { Text("Code (3 characters)") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = lat,
+                    onValueChange = { lat = it },
+                    label = { Text("Latitude") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = lon,
+                    onValueChange = { lon = it },
+                    label = { Text("Longitude") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = zone,
+                    onValueChange = { zone = it },
+                    label = { Text("IANA time zone, e.g. Europe/Paris") },
+                    singleLine = true,
+                )
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    androidx.compose.material3.Checkbox(checked = home, onCheckedChange = { home = it })
+                    Checkbox(checked = home, onCheckedChange = { home = it })
                     Text("Home city")
                 }
-                if (error != null) {
-                    Text(error!!, color = Color(0xFFFF6B6B))
-                }
+                error?.let { Text(it, color = ErrorRed) }
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    val latitude = lat.toDoubleOrNull()
-                    val longitude = lon.toDoubleOrNull()
-                    if (code.length != 3) {
-                        error = "Code must be 3 characters"
-                        return@TextButton
+                    val latitude = lat.trim().toDoubleOrNull()
+                    val longitude = lon.trim().toDoubleOrNull()
+                    val zoneId = zone.trim()
+                    error = when {
+                        code.length != 3 -> "Code must be 3 letters or digits"
+                        isDuplicateCode(code) -> "Another city already uses $code"
+                        latitude == null || latitude !in -90.0..90.0 ->
+                            "Latitude must be between -90 and 90"
+                        longitude == null || longitude !in -180.0..180.0 ->
+                            "Longitude must be between -180 and 180"
+                        !isValidZone(zoneId) -> "Unknown IANA time zone"
+                        else -> null
                     }
-                    if (latitude == null || longitude == null) {
-                        error = "Latitude/longitude must be numbers"
-                        return@TextButton
+                    if (error == null && latitude != null && longitude != null) {
+                        onSave(City(code, latitude, longitude, zoneId, home))
                     }
-                    try {
-                        ZoneId.of(zone.trim())
-                    } catch (_: Exception) {
-                        error = "Invalid IANA time zone"
-                        return@TextButton
-                    }
-                    onSave(
-                        City(
-                            code = code.trim().uppercase(),
-                            latitude = latitude,
-                            longitude = longitude,
-                            timeZone = zone.trim(),
-                            home = home,
-                        ),
-                    )
                 },
             ) { Text("Save") }
         },
@@ -533,6 +434,14 @@ private fun CityEditorDialog(
         },
     )
 }
+
+private fun isValidZone(id: String): Boolean =
+    try {
+        ZoneId.of(id)
+        true
+    } catch (_: Exception) {
+        false
+    }
 
 @Composable
 private fun TickerEditorDialog(
@@ -544,59 +453,58 @@ private fun TickerEditorDialog(
     var symbol by remember { mutableStateOf(initial?.symbol ?: "") }
     var source by remember { mutableStateOf(initial?.source ?: TickerSource.FINNHUB) }
     var mode by remember { mutableStateOf(initial?.displayMode ?: TickerDisplayMode.PRICE) }
-    var sourceMenu by remember { mutableStateOf(false) }
-    var modeMenu by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    androidx.compose.material3.AlertDialog(
+    AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (initial == null) "Add ticker" else "Edit ticker") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = label, onValueChange = { label = it }, label = { Text("Label") }, singleLine = true)
-                OutlinedTextField(value = symbol, onValueChange = { symbol = it }, label = { Text("Symbol / CoinGecko id") }, singleLine = true)
-                BoxDropdown("Source: $source", expanded = sourceMenu, onExpand = { sourceMenu = true }, onDismiss = { sourceMenu = false }) {
-                    TickerSource.entries.forEach { option ->
-                        DropdownMenuItem(
-                            text = { Text(option.name) },
-                            onClick = {
-                                source = option
-                                sourceMenu = false
-                            },
+                OutlinedTextField(
+                    value = label,
+                    onValueChange = { label = it },
+                    label = { Text("Label shown on the widget") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = symbol,
+                    onValueChange = { symbol = it },
+                    label = {
+                        Text(
+                            if (source == TickerSource.FINNHUB) "Finnhub symbol, e.g. SPY"
+                            else "CoinGecko id, e.g. helium",
                         )
-                    }
-                }
-                BoxDropdown("Mode: $mode", expanded = modeMenu, onExpand = { modeMenu = true }, onDismiss = { modeMenu = false }) {
-                    TickerDisplayMode.entries.forEach { option ->
-                        DropdownMenuItem(
-                            text = { Text(option.name) },
-                            onClick = {
-                                mode = option
-                                modeMenu = false
-                            },
-                        )
-                    }
-                }
-                if (error != null) {
-                    Text(error!!, color = Color(0xFFFF6B6B))
-                }
+                    },
+                    singleLine = true,
+                )
+                Dropdown(
+                    label = "Source: ${source.name}",
+                    options = TickerSource.entries,
+                    optionLabel = { it.name },
+                    onSelect = { source = it },
+                )
+                Dropdown(
+                    label = "Show: ${mode.name}",
+                    options = TickerDisplayMode.entries,
+                    optionLabel = { it.name },
+                    onSelect = { mode = it },
+                )
+                error?.let { Text(it, color = ErrorRed) }
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    if (label.isBlank() || symbol.isBlank()) {
-                        error = "Label and symbol are required"
-                        return@TextButton
+                    val cleanLabel = label.trim()
+                    // Finnhub symbols are upper case; CoinGecko ids are lower case.
+                    val cleanSymbol = symbol.trim().let {
+                        if (source == TickerSource.FINNHUB) it.uppercase() else it.lowercase()
                     }
-                    onSave(
-                        Ticker(
-                            label = label.trim(),
-                            symbol = symbol.trim(),
-                            source = source,
-                            displayMode = mode,
-                        ),
-                    )
+                    if (cleanLabel.isEmpty() || cleanSymbol.isEmpty()) {
+                        error = "Label and symbol are required"
+                    } else {
+                        onSave(Ticker(cleanLabel, cleanSymbol, source, mode))
+                    }
                 },
             ) { Text("Save") }
         },
@@ -607,19 +515,27 @@ private fun TickerEditorDialog(
 }
 
 @Composable
-private fun BoxDropdown(
+private fun <T> Dropdown(
     label: String,
-    expanded: Boolean,
-    onExpand: () -> Unit,
-    onDismiss: () -> Unit,
-    content: @Composable () -> Unit,
+    options: List<T>,
+    optionLabel: (T) -> String,
+    onSelect: (T) -> Unit,
 ) {
+    var expanded by remember { mutableStateOf(false) }
     Column {
-        OutlinedButton(onClick = onExpand, modifier = ComposeModifier.fillMaxWidth()) {
+        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
             Text(label)
         }
-        DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
-            content()
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(optionLabel(option)) },
+                    onClick = {
+                        onSelect(option)
+                        expanded = false
+                    },
+                )
+            }
         }
     }
 }

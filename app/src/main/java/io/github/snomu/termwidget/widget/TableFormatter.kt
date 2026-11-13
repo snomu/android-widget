@@ -14,7 +14,6 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.TextStyle
 import java.util.Locale
-import kotlin.math.abs
 
 object TableFormatter {
     private const val CURRENT_WIDTH = 3
@@ -27,8 +26,8 @@ object TableFormatter {
         market: MarketCache?,
         nowEpochMs: Long,
     ): TableModel {
-        val home = config.cities.firstOrNull { it.home } ?: config.cities.first()
-        val homeZone = ZoneId.of(home.timeZone)
+        val home = config.cities.firstOrNull { it.home } ?: config.cities.firstOrNull()
+        val homeZone = zoneOf(home?.timeZone)
         val homeDate = Instant.ofEpochMilli(nowEpochMs).atZone(homeZone).toLocalDate()
         val headerDates = (0..FORECAST_DAYS).map { homeDate.plusDays(it.toLong()) }
         // Prefix matches code(3) + 2 spaces + HH:mm(5) + marker(1) + space(1) = 12.
@@ -41,9 +40,7 @@ object TableFormatter {
         val weatherByCode = weather?.cities?.associateBy { it.code }.orEmpty()
         val weatherStale = weather == null ||
             nowEpochMs - weather.fetchedAtEpochMs > Defaults.STALE_AFTER_MS
-        val marketBySymbol = market?.quotes?.associateBy { it.symbol }.orEmpty()
-        val marketStale = market == null ||
-            nowEpochMs - market.fetchedAtEpochMs > Defaults.STALE_AFTER_MS
+        val quotesById = market?.quotes?.associateBy { it.source to it.symbol }.orEmpty()
 
         val rows = config.cities.map { city ->
             formatCityRow(
@@ -57,7 +54,7 @@ object TableFormatter {
         }
 
         val tickers = config.tickers.map { ticker ->
-            formatTicker(ticker, marketBySymbol[ticker.symbol], marketStale)
+            formatTicker(ticker, quotesById[ticker.source to ticker.symbol], nowEpochMs)
         }
 
         val sampleRow = buildPlainRowSample(rows.firstOrNull())
@@ -87,7 +84,7 @@ object TableFormatter {
         val clockColor = Palette.withAlpha(Palette.CLOCK, alpha)
 
         val cityDate = Instant.ofEpochMilli(nowEpochMs)
-            .atZone(ZoneId.of(city.timeZone))
+            .atZone(zoneOf(city.timeZone))
             .toLocalDate()
         val marker = if (cityDate.isAfter(homeDate)) "⁺" else " "
 
@@ -132,6 +129,7 @@ object TableFormatter {
 
         return CityRowModel(
             code = city.code.padEnd(3).take(3),
+            home = isHome,
             codeColor = codeColor,
             timeZone = city.timeZone,
             clockColor = clockColor,
@@ -142,7 +140,7 @@ object TableFormatter {
     private fun formatTicker(
         ticker: Ticker,
         quote: Quote?,
-        marketStale: Boolean,
+        nowEpochMs: Long,
     ): TickerItemModel {
         val labelColor = Palette.DEFAULT_TEXT
         if (quote == null) {
@@ -158,10 +156,12 @@ object TableFormatter {
             TickerDisplayMode.PRICE -> formatPrice(quote.price)
             TickerDisplayMode.PERCENT -> formatPercent(quote.changePercent)
         }
+        val stale = nowEpochMs - quote.fetchedAtEpochMs > Defaults.STALE_AFTER_MS
         val valueColor = when {
-            marketStale -> Palette.DIM
-            quote.changePercent >= 0 -> Palette.MARKET_UP
-            else -> Palette.MARKET_DOWN
+            stale -> Palette.DIM
+            quote.changePercent > 0 -> Palette.MARKET_UP
+            quote.changePercent < 0 -> Palette.MARKET_DOWN
+            else -> Palette.DEFAULT_TEXT
         }
         return TickerItemModel(
             label = ticker.label,
@@ -174,18 +174,18 @@ object TableFormatter {
     fun formatTemp(value: Int, width: Int): String =
         value.toString().padStart(width)
 
-    fun formatPrice(price: Double): String {
-        return when {
-            abs(price) >= 100 -> String.format(Locale.US, "%.2f", price)
-            abs(price) >= 1 -> String.format(Locale.US, "%.2f", price)
-            else -> String.format(Locale.US, "%.2f", price)
-        }
-    }
+    fun formatPrice(price: Double): String = String.format(Locale.US, "%.2f", price)
 
-    fun formatPercent(change: Double): String {
-        val sign = if (change >= 0) "+" else ""
-        return String.format(Locale.US, "%s%.2f%%", sign, change)
-    }
+    /** Always signed, so the direction is readable even when the value is dimmed. */
+    fun formatPercent(change: Double): String = String.format(Locale.US, "%+.2f%%", change)
+
+    /** A zone id that no longer resolves falls back to UTC instead of crashing the widget. */
+    private fun zoneOf(id: String?): ZoneId =
+        try {
+            if (id == null) ZoneId.of("UTC") else ZoneId.of(id)
+        } catch (_: Exception) {
+            ZoneId.of("UTC")
+        }
 
     private fun buildPlainRowSample(row: CityRowModel?): String {
         if (row == null) {

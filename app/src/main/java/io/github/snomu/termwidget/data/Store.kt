@@ -25,17 +25,20 @@ class Store(private val context: Context) {
 
     val configFlow: Flow<AppConfig> = context.appDataStore.data.map { prefs ->
         AppConfig(
-            cities = prefs[citiesKey]?.let { decodeList(it) } ?: Defaults.cities,
-            tickers = prefs[tickersKey]?.let { decodeList(it) } ?: Defaults.tickers,
+            cities = prefs[citiesKey]?.let { decodeOrNull<List<City>>(it) }
+                ?.takeIf { it.isNotEmpty() }
+                ?: Defaults.cities,
+            tickers = prefs[tickersKey]?.let { decodeOrNull<List<Ticker>>(it) }
+                ?: Defaults.tickers,
         )
     }
 
     val weatherFlow: Flow<WeatherCache?> = context.appDataStore.data.map { prefs ->
-        prefs[weatherKey]?.let { decode(it) }
+        prefs[weatherKey]?.let { decodeOrNull<WeatherCache>(it) }
     }
 
     val marketFlow: Flow<MarketCache?> = context.appDataStore.data.map { prefs ->
-        prefs[marketKey]?.let { decode(it) }
+        prefs[marketKey]?.let { decodeOrNull<MarketCache>(it) }
     }
 
     suspend fun getConfig(): AppConfig = configFlow.first()
@@ -46,34 +49,36 @@ class Store(private val context: Context) {
 
     suspend fun saveCities(cities: List<City>) {
         context.appDataStore.edit { prefs ->
-            prefs[citiesKey] = encode(cities)
+            prefs[citiesKey] = Jsonx.json.encodeToString(cities)
         }
     }
 
     suspend fun saveTickers(tickers: List<Ticker>) {
         context.appDataStore.edit { prefs ->
-            prefs[tickersKey] = encode(tickers)
+            prefs[tickersKey] = Jsonx.json.encodeToString(tickers)
         }
     }
 
     suspend fun saveWeather(cache: WeatherCache) {
         context.appDataStore.edit { prefs ->
-            prefs[weatherKey] = encode(cache)
+            prefs[weatherKey] = Jsonx.json.encodeToString(cache)
         }
     }
 
     suspend fun saveMarket(cache: MarketCache) {
         context.appDataStore.edit { prefs ->
-            prefs[marketKey] = encode(cache)
+            prefs[marketKey] = Jsonx.json.encodeToString(cache)
         }
     }
 
-    private inline fun <reified T> encode(value: T): String =
-        Jsonx.json.encodeToString(value)
-
-    private inline fun <reified T> decode(value: String): T =
-        Jsonx.json.decodeFromString(value)
-
-    private inline fun <reified T> decodeList(value: String): List<T> =
-        Jsonx.json.decodeFromString(value)
+    /**
+     * A stored value that no longer matches the schema (for example after an
+     * update changed a model) is treated as absent instead of crashing the widget.
+     */
+    private inline fun <reified T> decodeOrNull(value: String): T? =
+        try {
+            Jsonx.json.decodeFromString<T>(value)
+        } catch (_: Exception) {
+            null
+        }
 }

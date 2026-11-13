@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:gravity="center_vertical"
@@ -12,22 +13,12 @@
         android:ellipsize="none"
         android:fontFamily="monospace"
         android:includeFontPadding="false"
+        android:useBoundsForWidth="false"
         android:maxLines="1"
         android:singleLine="true"
         android:textColor="@color/default_text"
-        android:textSize="12sp" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:ellipsize="none"
-        android:fontFamily="monospace"
-        android:includeFontPadding="false"
-        android:maxLines="1"
-        android:singleLine="true"
-        android:text="  "
-        android:textColor="@color/default_text"
-        android:textSize="12sp" />
+        android:textSize="12sp"
+        tools:targetApi="35" />
 
     <TextClock
         android:id="@+id/city_clock"
@@ -38,10 +29,12 @@
         android:format12Hour="HH:mm"
         android:format24Hour="HH:mm"
         android:includeFontPadding="false"
+        android:useBoundsForWidth="false"
         android:maxLines="1"
         android:singleLine="true"
         android:textColor="@color/clock"
-        android:textSize="12sp" />
+        android:textSize="12sp"
+        tools:targetApi="35" />
 
     <TextView
         android:id="@+id/city_temps"
@@ -50,8 +43,10 @@
         android:ellipsize="none"
         android:fontFamily="monospace"
         android:includeFontPadding="false"
+        android:useBoundsForWidth="false"
         android:maxLines="1"
         android:singleLine="true"
         android:textColor="@color/default_text"
-        android:textSize="12sp" />
+        android:textSize="12sp"
+        tools:targetApi="35" />
 </LinearLayout>

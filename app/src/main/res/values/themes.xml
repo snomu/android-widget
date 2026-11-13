@@ -7,4 +7,17 @@
         <item name="android:colorBackground">@color/background</item>
         <item name="android:textColorPrimary">@color/default_text</item>
     </style>
+
+    <!-- Used only by the static widget picker preview. -->
+    <style name="WidgetPreviewText">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:includeFontPadding">false</item>
+        <item name="android:textSize">13sp</item>
+    </style>
+
+    <style name="WidgetPreviewText.Ticker">
+        <item name="android:textSize">10sp</item>
+    </style>
 </resources>

@@ -55,14 +55,15 @@ data class WeatherCache(
 
 @Serializable
 data class Quote(
+    val source: TickerSource,
     val symbol: String,
     val price: Double,
     val changePercent: Double,
+    val fetchedAtEpochMs: Long,
 )
 
 @Serializable
 data class MarketCache(
-    val fetchedAtEpochMs: Long,
     val quotes: List<Quote>,
 )
 

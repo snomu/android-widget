@@ -1,19 +1,19 @@
 package io.github.snomu.termwidget.net
 
 import io.github.snomu.termwidget.data.Jsonx
-import io.github.snomu.termwidget.model.Quote
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
 import okhttp3.Request
 
 class CoinGeckoClient(
-    private val client: okhttp3.OkHttpClient = HttpClient.okHttp,
+    private val client: OkHttpClient = HttpClient.okHttp,
 ) {
-    fun prices(ids: List<String>): List<Quote> {
-        if (ids.isEmpty()) return emptyList()
+    /** Returns the ids that CoinGecko knows; unknown ids are simply absent. */
+    fun prices(ids: List<String>): Map<String, PriceChange> {
+        if (ids.isEmpty()) return emptyMap()
 
         val url = BASE.toHttpUrl().newBuilder()
             .addQueryParameter("ids", ids.joinToString(","))
@@ -26,20 +26,21 @@ class CoinGeckoClient(
             if (!response.isSuccessful) {
                 error("CoinGecko HTTP ${response.code}")
             }
-            val body = response.body.string()
-            val root = Jsonx.json.decodeFromString<JsonObject>(body)
-            return ids.map { id ->
-                val entry = root[id]?.jsonObject
-                    ?: error("CoinGecko missing id $id")
-                val price = entry["usd"]?.jsonPrimitive?.doubleOrNull
-                    ?: error("CoinGecko missing usd for $id")
-                val change = entry["usd_24h_change"]?.jsonPrimitive?.doubleOrNull ?: 0.0
-                Quote(symbol = id, price = price, changePercent = change)
-            }
+            return parsePrices(response.body.string(), ids)
         }
     }
 
     companion object {
         private const val BASE = "https://api.coingecko.com/api/v3/simple/price"
+
+        fun parsePrices(body: String, ids: List<String>): Map<String, PriceChange> {
+            val root = Jsonx.json.decodeFromString<JsonObject>(body)
+            return ids.mapNotNull { id ->
+                val entry = root[id] as? JsonObject ?: return@mapNotNull null
+                val price = entry["usd"]?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null
+                val change = entry["usd_24h_change"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                id to PriceChange(price, change)
+            }.toMap()
+        }
     }
 }

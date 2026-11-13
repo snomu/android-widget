@@ -8,6 +8,7 @@ data class ColoredText(
 
 data class CityRowModel(
     val code: String,
+    val home: Boolean,
     val codeColor: Int,
     val timeZone: String,
     val clockColor: Int,

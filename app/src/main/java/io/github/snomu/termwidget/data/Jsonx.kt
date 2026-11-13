@@ -6,6 +6,5 @@ object Jsonx {
     val json: Json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
-        isLenient = true
     }
 }

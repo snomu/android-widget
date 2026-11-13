@@ -11,19 +11,23 @@ import io.github.snomu.termwidget.widget.TermWidgetProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+/**
+ * Refreshes weather and markets independently, keeps the cached values for
+ * whatever failed, then re-renders every widget. It always succeeds: a failed
+ * fetch is retried by the next periodic run, and re-rendering is what applies
+ * the staleness dimming while offline.
+ */
 class RefreshWorker(
     appContext: Context,
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val store = Store(applicationContext)
-        val keyVault = KeyVault(applicationContext)
         val config = store.getConfig()
         val now = System.currentTimeMillis()
 
         try {
-            val weather = OpenMeteoClient().fetch(config.cities, now)
-            store.saveWeather(weather)
+            store.saveWeather(OpenMeteoClient().fetch(config.cities, now))
         } catch (_: Exception) {
             // Keep cached weather.
         }
@@ -31,7 +35,8 @@ class RefreshWorker(
         try {
             val market = MarketFetcher().fetch(
                 tickers = config.tickers,
-                finnhubApiKey = keyVault.load(),
+                finnhubApiKey = KeyVault(applicationContext).load(),
+                previous = store.getMarket(),
                 nowEpochMs = now,
             )
             store.saveMarket(market)

@@ -3,7 +3,6 @@ package io.github.snomu.termwidget.widget
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.content.Context
-import android.content.Intent
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.Build
@@ -11,26 +10,38 @@ import android.os.Bundle
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
-import android.text.style.RelativeSizeSpan
 import android.text.style.ScaleXSpan
 import android.text.style.StyleSpan
-import android.text.style.SuperscriptSpan
 import android.util.SizeF
 import android.util.TypedValue
 import android.widget.RemoteViews
+import androidx.core.os.BundleCompat
 import io.github.snomu.termwidget.R
 import io.github.snomu.termwidget.model.AppConfig
 import io.github.snomu.termwidget.model.MarketCache
 import io.github.snomu.termwidget.model.WeatherCache
+import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
-import kotlin.math.min
 
 object WidgetRenderer {
-    private const val HORIZONTAL_PADDING_DP = 10f
+    // Fallback size, matching res/xml/widget_info.xml, for hosts that report no size.
+    private const val DEFAULT_WIDTH_DP = 250f
+    private const val DEFAULT_HEIGHT_DP = 110f
+
+    private const val MIN_SIDE_PADDING_DP = 8f
     private const val VERTICAL_PADDING_DP = 8f
-    private const val SAFETY = 0.96f
+
+    // Must match the separator in res/layout/widget.xml: 1px line with 4dp margins.
+    private const val SEPARATOR_MARGIN_DP = 4f
+    private const val SEPARATOR_LINE_PX = 1f
+
     private const val TICKER_SCALE = 0.80f
-    private const val MIN_FONT_PX = 8f
+    private const val MIN_CELL_PX = 4
+    private const val MIN_TICKER_FONT_PX = 6f
+    private const val MARKER = "⁺"
+    private const val CODE_GAP = "  "
 
     fun render(
         context: Context,
@@ -43,22 +54,20 @@ object WidgetRenderer {
         refreshIntent: PendingIntent,
     ): RemoteViews {
         val model = TableFormatter.format(config, weather, market, nowEpochMs)
-        val manager = AppWidgetManager.getInstance(context)
-        val opts = options ?: manager.getAppWidgetOptions(appWidgetId)
+        val opts = options ?: AppWidgetManager.getInstance(context).getAppWidgetOptions(appWidgetId)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val sizes = opts.getParcelableArrayList<SizeF>(AppWidgetManager.OPTION_APPWIDGET_SIZES)
+            val sizes = BundleCompat.getParcelableArrayList(
+                opts,
+                AppWidgetManager.OPTION_APPWIDGET_SIZES,
+                SizeF::class.java,
+            )
             if (!sizes.isNullOrEmpty()) {
-                val sized = sizes.associateWith { size ->
-                    buildViews(
-                        context = context,
-                        model = model,
-                        widthDp = size.width,
-                        heightDp = size.height,
-                        refreshIntent = refreshIntent,
-                    )
-                }
-                return RemoteViews(sized)
+                return RemoteViews(
+                    sizes.associateWith { size ->
+                        buildViews(context, model, size.width, size.height, refreshIntent)
+                    },
+                )
             }
         }
 
@@ -67,21 +76,15 @@ object WidgetRenderer {
         val minHeight = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT).toFloat()
         val maxHeight = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT).toFloat()
 
-        val portrait = buildViews(
-            context = context,
-            model = model,
-            widthDp = minWidth.coerceAtLeast(1f),
-            heightDp = maxHeight.coerceAtLeast(1f),
-            refreshIntent = refreshIntent,
-        )
-        val landscape = buildViews(
-            context = context,
-            model = model,
-            widthDp = maxWidth.coerceAtLeast(minWidth).coerceAtLeast(1f),
-            heightDp = minHeight.coerceAtLeast(1f),
-            refreshIntent = refreshIntent,
-        )
-        return RemoteViews(portrait, landscape)
+        // Portrait is the narrow, tall size; landscape is the wide, short one.
+        val portraitWidth = if (minWidth > 0f) minWidth else DEFAULT_WIDTH_DP
+        val portraitHeight = if (maxHeight > 0f) maxHeight else DEFAULT_HEIGHT_DP
+        val landscapeWidth = if (maxWidth > 0f) maxWidth else portraitWidth
+        val landscapeHeight = if (minHeight > 0f) minHeight else portraitHeight
+
+        val portrait = buildViews(context, model, portraitWidth, portraitHeight, refreshIntent)
+        val landscape = buildViews(context, model, landscapeWidth, landscapeHeight, refreshIntent)
+        return RemoteViews(landscape, portrait)
     }
 
     private fun buildViews(
@@ -94,31 +97,46 @@ object WidgetRenderer {
         val density = context.resources.displayMetrics.density
         val widthPx = widthDp * density
         val heightPx = heightDp * density
-        val usableWidth = max(1f, widthPx - HORIZONTAL_PADDING_DP * 2f * density)
-        val usableHeight = max(1f, heightPx - VERTICAL_PADDING_DP * 2f * density)
+        val verticalPaddingPx = (VERTICAL_PADDING_DP * density).toInt()
 
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            typeface = Typeface.MONOSPACE
-            textSize = 100f
-        }
-        val advance = paint.measureText("0") / 100f
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.MONOSPACE }
         val rowChars = model.rowCharCount.coerceAtLeast(1)
-        var fontPx = (usableWidth / (rowChars * advance)) * SAFETY
-
         val tableLines = 1 + model.rows.size
-        val tickerLineFactor = TICKER_SCALE
-        val totalLineUnits = tableLines + tickerLineFactor + 0.35f
-        val maxByHeight = usableHeight / totalLineUnits
-        fontPx = min(fontPx, maxByHeight * SAFETY)
-        fontPx = max(fontPx, MIN_FONT_PX)
+        val separatorPx = SEPARATOR_LINE_PX + 2f * SEPARATOR_MARGIN_DP * density
 
-        var tickerPx = fontPx * TICKER_SCALE
-        tickerPx = fitTickerFont(model.tickers, tickerPx, usableWidth)
+        // Every character sits in a cell that is a whole number of pixels wide.
+        // The header is one TextView and each row is three, so a fractional
+        // advance would round differently per view and the columns would drift.
+        val availableWidth = widthPx - 2f * MIN_SIDE_PADDING_DP * density
+        val availableHeight = heightPx - 2f * verticalPaddingPx
+        var cellPx = max(MIN_CELL_PX, floor(availableWidth / rowChars).toInt())
+        var fontPx = fontForCell(paint, cellPx, rowChars)
+        while (cellPx > MIN_CELL_PX &&
+            contentHeight(paint, fontPx, tableLines, separatorPx) > availableHeight
+        ) {
+            cellPx -= 1
+            fontPx = fontForCell(paint, cellPx, rowChars)
+        }
 
-        val markerAdvanceOk = measureMarkerAdvanceOk(paint, fontPx)
+        val tableWidthPx = cellPx * rowChars
+        val tickerPx = fitTickerFont(paint, model.tickers, fontPx * TICKER_SCALE, tableWidthPx.toFloat())
+
+        // Centre the table; the separator and ticker line then span exactly its width.
+        val spare = max(0, widthPx.toInt() - tableWidthPx)
+        val paddingLeft = spare / 2
+        val paddingRight = spare - paddingLeft
+
+        val markerGapScale = markerGapScale(paint, fontPx)
 
         val views = RemoteViews(context.packageName, R.layout.widget)
         views.setOnClickPendingIntent(R.id.widget_root, refreshIntent)
+        views.setViewPadding(
+            R.id.widget_root,
+            paddingLeft,
+            verticalPaddingPx,
+            paddingRight,
+            verticalPaddingPx,
+        )
 
         views.setTextViewText(R.id.header, model.header)
         views.setTextColor(R.id.header, model.headerColor)
@@ -127,34 +145,27 @@ object WidgetRenderer {
         views.removeAllViews(R.id.rows_container)
         for (row in model.rows) {
             val rowViews = RemoteViews(context.packageName, R.layout.widget_row)
-            val codeText = SpannableStringBuilder(row.code)
-            codeText.setSpan(
-                ForegroundColorSpan(row.codeColor),
-                0,
-                codeText.length,
-                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-            )
-            if ((row.codeColor and 0x00FFFFFF) == (Palette.HOME_CODE and 0x00FFFFFF) &&
-                (row.codeColor ushr 24) == 0xFF
-            ) {
-                codeText.setSpan(
-                    StyleSpan(Typeface.BOLD),
-                    0,
-                    codeText.length,
-                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                )
+
+            val code = SpannableStringBuilder(row.code)
+            code.setSpan(ForegroundColorSpan(row.codeColor), 0, code.length, SPAN_FLAGS)
+            if (row.home) {
+                code.setSpan(StyleSpan(Typeface.BOLD), 0, code.length, SPAN_FLAGS)
             }
-            rowViews.setTextViewText(R.id.city_code, codeText)
+            // The gap before the clock lives in the same view, so a bold code
+            // cannot push the clock off the grid.
+            code.append(CODE_GAP)
+            rowViews.setTextViewText(R.id.city_code, code)
             rowViews.setTextViewTextSize(R.id.city_code, TypedValue.COMPLEX_UNIT_PX, fontPx)
 
+            // TextClock ticks inside the launcher process, so the minute changes
+            // without waking this app.
             rowViews.setTextViewTextSize(R.id.city_clock, TypedValue.COMPLEX_UNIT_PX, fontPx)
             rowViews.setTextColor(R.id.city_clock, row.clockColor)
             rowViews.setCharSequence(R.id.city_clock, "setFormat12Hour", "HH:mm")
             rowViews.setCharSequence(R.id.city_clock, "setFormat24Hour", "HH:mm")
             rowViews.setString(R.id.city_clock, "setTimeZone", row.timeZone)
 
-            val temps = buildTempsSpannable(row.markerAndTemps, markerAdvanceOk)
-            rowViews.setTextViewText(R.id.city_temps, temps)
+            rowViews.setTextViewText(R.id.city_temps, buildTemps(row.markerAndTemps, markerGapScale))
             rowViews.setTextViewTextSize(R.id.city_temps, TypedValue.COMPLEX_UNIT_PX, fontPx)
 
             views.addView(R.id.rows_container, rowViews)
@@ -163,29 +174,19 @@ object WidgetRenderer {
         views.removeAllViews(R.id.ticker_container)
         model.tickers.forEachIndexed { index, item ->
             if (index > 0) {
-                val spacer = RemoteViews(context.packageName, R.layout.widget_ticker_spacer)
-                views.addView(R.id.ticker_container, spacer)
+                views.addView(
+                    R.id.ticker_container,
+                    RemoteViews(context.packageName, R.layout.widget_ticker_spacer),
+                )
             }
             val itemViews = RemoteViews(context.packageName, R.layout.widget_ticker_item)
-            val labelAndValue = SpannableStringBuilder()
-            val labelStart = labelAndValue.length
-            labelAndValue.append(item.label)
-            labelAndValue.setSpan(
-                ForegroundColorSpan(item.labelColor),
-                labelStart,
-                labelAndValue.length,
-                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-            )
-            labelAndValue.append(' ')
-            val valueStart = labelAndValue.length
-            labelAndValue.append(item.value)
-            labelAndValue.setSpan(
-                ForegroundColorSpan(item.valueColor),
-                valueStart,
-                labelAndValue.length,
-                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-            )
-            itemViews.setTextViewText(R.id.ticker_text, labelAndValue)
+            val text = SpannableStringBuilder(item.label)
+            text.setSpan(ForegroundColorSpan(item.labelColor), 0, text.length, SPAN_FLAGS)
+            text.append(' ')
+            val valueStart = text.length
+            text.append(item.value)
+            text.setSpan(ForegroundColorSpan(item.valueColor), valueStart, text.length, SPAN_FLAGS)
+            itemViews.setTextViewText(R.id.ticker_text, text)
             itemViews.setTextViewTextSize(R.id.ticker_text, TypedValue.COMPLEX_UNIT_PX, tickerPx)
             views.addView(R.id.ticker_container, itemViews)
         }
@@ -193,81 +194,107 @@ object WidgetRenderer {
         return views
     }
 
-    private fun buildTempsSpannable(
-        parts: List<ColoredText>,
-        markerAdvanceOk: Boolean,
-    ): SpannableStringBuilder {
-        val builder = SpannableStringBuilder()
-        for (part in parts) {
-            if (part.text == "⁺" && !markerAdvanceOk) {
-                val start = builder.length
-                builder.append('+')
-                builder.setSpan(SuperscriptSpan(), start, start + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                builder.setSpan(RelativeSizeSpan(0.7f), start, start + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                builder.setSpan(ScaleXSpan(1.15f), start, start + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                builder.setSpan(
-                    ForegroundColorSpan(part.color),
-                    start,
-                    start + 1,
-                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                )
-                continue
-            }
+    /**
+     * The largest text size whose character advance does not exceed [cellPx].
+     * It lands a hair under the whole pixel, so every run of n characters
+     * rounds up to exactly n cells when a TextView measures it.
+     */
+    private fun fontForCell(paint: Paint, cellPx: Int, rowChars: Int): Float {
+        paint.textSize = 100f
+        val advancePerPx = advance(paint, "0") / 100f
+        if (advancePerPx <= 0f) return cellPx.toFloat()
 
+        val sample = "0".repeat(rowChars)
+        val target = (cellPx * rowChars).toFloat()
+        var size = cellPx / advancePerPx
+        paint.textSize = size
+        var guard = 0
+        while (advance(paint, sample) > target && guard < 200) {
+            size -= 0.01f
+            paint.textSize = size
+            guard += 1
+        }
+        return size
+    }
+
+    /** The exact, unrounded advance of [text]. */
+    private fun advance(paint: Paint, text: String): Float =
+        paint.getRunAdvance(text, 0, text.length, 0, text.length, false, text.length)
+
+    /**
+     * The superscript plus usually comes from a fallback font and is narrower
+     * than a cell. Rather than distort the glyph, the space that follows it is
+     * stretched so that the pair still takes exactly two cells. Returns the
+     * scale for that space, or null when no adjustment is needed.
+     */
+    private fun markerGapScale(paint: Paint, fontPx: Float): Float? {
+        paint.textSize = fontPx
+        val cell = advance(paint, "0")
+        val marker = advance(paint, MARKER)
+        val wanted = 2f * cell - marker
+        if (abs(marker - cell) < 0.01f || cell <= 0f || wanted <= 0f) return null
+
+        // Advances can be rounded to whole pixels, so home in on the scale by
+        // measuring rather than trusting the arithmetic.
+        var scale = wanted / cell
+        val step = 0.2f / cell
+        for (attempt in 0 until 60) {
+            paint.textScaleX = scale
+            val actual = advance(paint, " ")
+            when {
+                actual > wanted + 0.01f -> scale -= step
+                actual < wanted - 0.01f -> scale += step
+                else -> break
+            }
+        }
+        paint.textScaleX = 1f
+        return scale
+    }
+
+    private fun contentHeight(paint: Paint, fontPx: Float, tableLines: Int, separatorPx: Float): Float =
+        tableLines * lineHeight(paint, fontPx) + separatorPx + lineHeight(paint, fontPx * TICKER_SCALE)
+
+    /** Height of one line in a TextView with includeFontPadding="false". */
+    private fun lineHeight(paint: Paint, fontPx: Float): Float {
+        paint.textSize = fontPx
+        val metrics = paint.fontMetrics
+        return ceil(metrics.descent - metrics.ascent) + 1f
+    }
+
+    /** Shrinks the ticker line until its items fit with at least one space between them. */
+    private fun fitTickerFont(
+        paint: Paint,
+        tickers: List<TickerItemModel>,
+        preferred: Float,
+        tableWidthPx: Float,
+    ): Float {
+        if (tickers.isEmpty()) return preferred
+        val joined = tickers.joinToString(" ") { "${it.label} ${it.value}" }
+        var size = preferred
+        paint.textSize = size
+        while (size > MIN_TICKER_FONT_PX && paint.measureText(joined) + tickers.size > tableWidthPx) {
+            size -= 0.25f
+            paint.textSize = size
+        }
+        return size
+    }
+
+    private fun buildTemps(parts: List<ColoredText>, markerGapScale: Float?): SpannableStringBuilder {
+        val builder = SpannableStringBuilder()
+        parts.forEachIndexed { index, part ->
             val start = builder.length
             builder.append(part.text)
-            builder.setSpan(
-                ForegroundColorSpan(part.color),
-                start,
-                builder.length,
-                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-            )
+            builder.setSpan(ForegroundColorSpan(part.color), start, builder.length, SPAN_FLAGS)
             if (part.bold) {
-                builder.setSpan(
-                    StyleSpan(Typeface.BOLD),
-                    start,
-                    builder.length,
-                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                )
+                builder.setSpan(StyleSpan(Typeface.BOLD), start, builder.length, SPAN_FLAGS)
+            }
+            val followsMarker = index > 0 && parts[index - 1].text == MARKER
+            if (followsMarker && markerGapScale != null && part.text == " ") {
+                builder.setSpan(ScaleXSpan(markerGapScale), start, builder.length, SPAN_FLAGS)
             }
         }
         return builder
     }
 
-    private fun measureMarkerAdvanceOk(paint: Paint, fontPx: Float): Boolean {
-        paint.textSize = fontPx
-        paint.typeface = Typeface.MONOSPACE
-        val zero = paint.measureText("0")
-        val marker = paint.measureText("⁺")
-        if (marker <= 0f) return false
-        return absRatio(marker, zero) < 0.08f
-    }
-
-    private fun absRatio(a: Float, b: Float): Float {
-        if (b == 0f) return 1f
-        return kotlin.math.abs(a - b) / b
-    }
-
-    private fun fitTickerFont(
-        tickers: List<TickerItemModel>,
-        preferred: Float,
-        usableWidth: Float,
-    ): Float {
-        if (tickers.isEmpty()) return preferred
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            typeface = Typeface.MONOSPACE
-            textSize = preferred
-        }
-        val joined = tickers.joinToString("  ") { "${it.label} ${it.value}" }
-        var size = preferred
-        var width = paint.measureText(joined)
-        while (width > usableWidth && size > MIN_FONT_PX) {
-            size -= 0.5f
-            paint.textSize = size
-            width = paint.measureText(joined)
-        }
-        return size
-    }
-
-    fun defaultSizeDp(): Pair<Float, Float> = 250f to 120f
+    private const val SPAN_FLAGS = Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
 }

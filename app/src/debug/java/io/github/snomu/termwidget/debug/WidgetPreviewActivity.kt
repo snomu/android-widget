@@ -1,6 +1,5 @@
 package io.github.snomu.termwidget.debug
 
-import android.app.PendingIntent
 import android.os.Bundle
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
@@ -11,8 +10,8 @@ import io.github.snomu.termwidget.work.RefreshScheduler
 import kotlinx.coroutines.runBlocking
 
 /**
- * Debug-only host that applies the same RemoteViews the launcher uses,
- * so we can screenshot the widget without pinning it to the home screen.
+ * Debug-only host that applies the same RemoteViews the launcher uses, so the
+ * widget can be checked without pinning it to a home screen. Not in release builds.
  */
 class WidgetPreviewActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -37,13 +36,7 @@ class WidgetPreviewActivity : ComponentActivity() {
         val (config, weather, market) = runBlocking {
             Triple(store.getConfig(), store.getWeather(), store.getMarket())
         }
-        val refreshIntent = PendingIntent.getBroadcast(
-            this,
-            0,
-            android.content.Intent(this, TermWidgetProvider::class.java)
-                .setAction(TermWidgetProvider.ACTION_REFRESH),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        val refreshIntent = TermWidgetProvider.refreshIntent(this, 0)
         val options = Bundle().apply {
             putInt(android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 250)
             putInt(android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, 250)

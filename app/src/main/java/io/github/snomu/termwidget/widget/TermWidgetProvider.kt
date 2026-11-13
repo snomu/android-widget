@@ -9,7 +9,10 @@ import android.content.Intent
 import android.os.Bundle
 import io.github.snomu.termwidget.data.Store
 import io.github.snomu.termwidget.work.RefreshScheduler
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class TermWidgetProvider : AppWidgetProvider() {
     override fun onUpdate(
@@ -18,9 +21,7 @@ class TermWidgetProvider : AppWidgetProvider() {
         appWidgetIds: IntArray,
     ) {
         RefreshScheduler.ensurePeriodic(context)
-        for (id in appWidgetIds) {
-            updateOne(context, appWidgetManager, id, null)
-        }
+        renderAsync { appWidgetIds.forEach { update(context, appWidgetManager, it, null) } }
     }
 
     override fun onAppWidgetOptionsChanged(
@@ -29,7 +30,7 @@ class TermWidgetProvider : AppWidgetProvider() {
         appWidgetId: Int,
         newOptions: Bundle?,
     ) {
-        updateOne(context, appWidgetManager, appWidgetId, newOptions)
+        renderAsync { update(context, appWidgetManager, appWidgetId, newOptions) }
     }
 
     override fun onEnabled(context: Context) {
@@ -39,10 +40,19 @@ class TermWidgetProvider : AppWidgetProvider() {
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
-        when (intent.action) {
-            ACTION_REFRESH -> RefreshScheduler.refreshNow(context)
-            AppWidgetManager.ACTION_APPWIDGET_UPDATE -> {
-                // Handled by onUpdate; keep periodic scheduled.
+        if (intent.action == ACTION_REFRESH) {
+            RefreshScheduler.refreshNow(context)
+        }
+    }
+
+    /** Reads the cache off the main thread while keeping the broadcast alive. */
+    private fun renderAsync(block: suspend () -> Unit) {
+        val pending = goAsync()
+        scope.launch {
+            try {
+                block()
+            } finally {
+                pending.finish()
             }
         }
     }
@@ -50,40 +60,41 @@ class TermWidgetProvider : AppWidgetProvider() {
     companion object {
         const val ACTION_REFRESH = "io.github.snomu.termwidget.action.REFRESH"
 
-        fun updateAll(context: Context) {
+        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        /** Re-renders every placed widget from the cache. */
+        suspend fun updateAll(context: Context) {
             val manager = AppWidgetManager.getInstance(context)
             val ids = manager.getAppWidgetIds(ComponentName(context, TermWidgetProvider::class.java))
-            for (id in ids) {
-                updateOne(context, manager, id, null)
-            }
+            ids.forEach { update(context, manager, it, null) }
         }
 
-        fun updateOne(
+        /** Re-renders one widget from the cache; null [options] means "ask the host". */
+        suspend fun update(
             context: Context,
             manager: AppWidgetManager,
             appWidgetId: Int,
             options: Bundle?,
         ) {
             val store = Store(context)
-            val (config, weather, market) = runBlocking {
-                Triple(store.getConfig(), store.getWeather(), store.getMarket())
-            }
-            val refreshIntent = PendingIntent.getBroadcast(
-                context,
-                appWidgetId,
-                Intent(context, TermWidgetProvider::class.java).setAction(ACTION_REFRESH),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
             val views = WidgetRenderer.render(
                 context = context,
                 appWidgetId = appWidgetId,
                 options = options,
-                config = config,
-                weather = weather,
-                market = market,
-                refreshIntent = refreshIntent,
+                config = store.getConfig(),
+                weather = store.getWeather(),
+                market = store.getMarket(),
+                refreshIntent = refreshIntent(context, appWidgetId),
             )
             manager.updateAppWidget(appWidgetId, views)
         }
+
+        fun refreshIntent(context: Context, requestCode: Int): PendingIntent =
+            PendingIntent.getBroadcast(
+                context,
+                requestCode,
+                Intent(context, TermWidgetProvider::class.java).setAction(ACTION_REFRESH),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
     }
 }
