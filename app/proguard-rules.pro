@@ -21,3 +21,7 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+
+# WorkManager creates its Room database by reflection. Without this, R8 removes
+# the generated class's constructor and the app crashes on launch.
+-keep class * extends androidx.room.RoomDatabase { <init>(); }
